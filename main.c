@@ -256,7 +256,11 @@ int meter_start(struct dr_meter *self, int channels, int sample_rate, int sample
 	self->sample_rate = sample_rate;
 	self->sample_fmt = sample_fmt;
 	self->sample_size = av_get_bytes_per_sample(sample_fmt);
-	self->fragment_size = ((long)sample_rate * FRAGMENT_LENGTH / 1000);
+	if (sample_rate == 44100) {
+		self->fragment_size = ((long)sample_rate + 60) * FRAGMENT_LENGTH / 1000;
+	} else {
+		self->fragment_size = (long)sample_rate * FRAGMENT_LENGTH / 1000;
+	}
 	assert(self->fragment_size > 0);
 	return 0;
 }
