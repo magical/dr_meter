@@ -33,6 +33,7 @@ struct stream_context {
 	int stream_index; // the stream we are decoding
 	AVPacket real_pkt;
 	AVPacket pkt;
+	AVFrame *frame;
 	enum {
 		STATE_UNINITIALIZED,
 		STATE_INITIALIZED,
@@ -41,17 +42,11 @@ struct stream_context {
 		STATE_NEED_FLUSH,
 		STATE_CLOSED,
 	} state;
-	void *buf;
-	size_t buf_size; // the number of bytes present
-	size_t buf_alloc_size; // the number of bytes allocated
 };
 
 void sc_init(struct stream_context *self) {
 	self->format_ctx = NULL;
 	self->stream_index = 0;
-	self->buf = NULL;
-	self->buf_size = 0;
-	self->buf_alloc_size = 0;
 	self->state = STATE_INITIALIZED;
 }
 
@@ -78,6 +73,7 @@ void sc_close(struct stream_context *self) {
 	if (STATE_OPEN <= self->state && self->state != STATE_CLOSED) {
 		avcodec_close(sc_get_codec(self));
 		avformat_close_input(&self->format_ctx);
+		av_free(self->frame);
 		self->state = STATE_CLOSED;
 	}
 }
@@ -94,17 +90,9 @@ int sc_start_stream(struct stream_context *self, int stream_index) {
 		return AVERROR_DECODER_NOT_FOUND;
 	}
 
-	// Allocate a buffer.
-	size_t buf_size = AVCODEC_MAX_AUDIO_FRAME_SIZE;
-	if (self->buf_alloc_size < buf_size) {
-		av_free(self->buf);
-		// NOTE: the buffer MUST be allocated with av_malloc;
-		// ffmpeg has some very strict alignment requirements.
-		self->buf = av_malloc(buf_size);
-		self->buf_size = 0;
-		self->buf_alloc_size = buf_size;
-	}
-	if (self->buf == NULL) {
+	// Allocate a frame.
+	self->frame = avcodec_alloc_frame();
+	if (self->frame == NULL) {
 		return AVERROR(ENOMEM);
 	}
 
@@ -143,17 +131,14 @@ int sc_get_next_frame(struct stream_context *self) {
 
 	// Decode the audio.
 
-	// The third parameter gives the size of the output buffer, and is set
-	// to the number of bytes used of the output buffer.
 	// The return value is the number of bytes read from the packet.
 	// The codec is not required to read the entire packet, so we may need
 	// to keep it around for a while.
-	int buf_size = self->buf_alloc_size;
-	err = avcodec_decode_audio3(codec_ctx, self->buf, &buf_size, &self->pkt);
+	int got_frame;
+	avcodec_get_frame_defaults(self->frame);
+	err = avcodec_decode_audio4(codec_ctx, self->frame, &got_frame, &self->pkt);
 	if (err < 0) { return err; }
 	int bytes_used = err;
-
-	self->buf_size = buf_size;
 
 	if (self->state == STATE_VALID_PACKET) {
 		if (0 < bytes_used && bytes_used < self->pkt.size) {
@@ -169,6 +154,16 @@ int sc_get_next_frame(struct stream_context *self) {
 	}
 
 	return 0;
+}
+
+void *sc_get_buf(struct stream_context *self)
+{
+	return self->frame->data[0];
+}
+
+size_t sc_get_samples(struct stream_context *self)
+{
+	return self->frame->nb_samples;
 }
 
 /******************************************************************************/
@@ -308,8 +303,7 @@ static inline void meter_scan_internal(struct dr_meter *self, void *buf, size_t 
 }
 
 /* Feed the meter. Scan a single frame of audio. */
-int meter_feed(struct dr_meter *self, void *buf, size_t buf_size) {
-	size_t samples = buf_size / (self->sample_size * self->channels);
+int meter_feed(struct dr_meter *self, void *buf, size_t samples) {
 	int err;
 
 	while (samples) {
@@ -447,7 +441,7 @@ int do_calculate_dr(const char *filename) {
 			goto cleanup;
 		}
 
-		err = meter_feed(&meter, sc.buf, sc.buf_size);
+		err = meter_feed(&meter, sc_get_buf(&sc), sc_get_samples(&sc));
 		if (err) { goto cleanup; }
 
 		if (fragment < meter.fragment) {
