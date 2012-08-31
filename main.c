@@ -451,7 +451,7 @@ int do_calculate_dr(const char *filename) {
 		if (fragment < meter.fragment) {
 			fragment = meter.fragment;
 			if ((throbbler_stage % 4) == 0) {
-				fprintf(stderr, "\033[1K\033[1G %c  %2i:%02i ",
+				fprintf(stderr, "\033[1K\033[1G %c  %2zu:%02zu ",
 						throbbler[throbbler_stage / 4],
 						(fragment * 3) / 60,
 						(fragment * 3) % 60);
