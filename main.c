@@ -9,6 +9,8 @@
 #include "libavformat/avformat.h"
 #include "libavutil/error.h"
 
+#define VERSION "0.1"
+
 #define MAX_CHANNELS 32
 #define MAX_FRAGMENTS 32768 // more than 24h
 
@@ -21,10 +23,22 @@
 #define FACTOR32 ((sample)1.0 / (sample)(1UL << 31))
 
 #define min(a, b) ((a) < (b) ? (a) : (b))
+#define max(a, b) ((a) < (b) ? (b) : (a))
 
 typedef double sample;
 
-const char throbbler[5] = "/-\\|";
+const char throbbler[4] = "/-\\|";
+
+struct track_info {
+	int err;
+	sample dr;
+	sample peak;
+	sample rms;
+	int duration;
+	char *artist;
+	char *album;
+	char *title;
+};
 
 /******************************************************************************/
 
@@ -166,6 +180,15 @@ size_t sc_get_samples(struct stream_context *self)
 	return self->frame->nb_samples;
 }
 
+char *sc_get_metadata(struct stream_context *self, const char *key)
+{
+	AVDictionaryEntry *entry = av_dict_get(self->format_ctx->metadata, key, NULL, 0);
+	if (entry != NULL) {
+		return entry->value;
+	}
+	return NULL;
+}
+
 /******************************************************************************/
 
 struct dr_meter {
@@ -179,6 +202,8 @@ struct dr_meter {
 	int sample_rate;
 	int sample_fmt;
 	int sample_size;
+
+	unsigned long long total_samples;
 
 	size_t fragment; // The index of the current fragment
 	size_t fragment_size; // The size of a fragment in samples
@@ -220,6 +245,7 @@ void meter_init(struct dr_meter *self) {
 	self->sample_rate = 0;
 	self->sample_size = 0;
 	self->sample_fmt = 0;
+	self->total_samples = 0;
 	self->fragment = 0;
 	self->fragment_size = 0;
 	self->fragment_read = 0;
@@ -310,6 +336,9 @@ static inline void meter_scan_internal(struct dr_meter *self, void *buf, size_t 
 int meter_feed(struct dr_meter *self, void *buf, size_t samples) {
 	int err;
 
+	//printf("%lld += %zu\n", self->total_samples, samples);
+	self->total_samples += samples;
+
 	while (samples) {
 		if (!self->fragment_started) {
 			err = meter_fragment_start(self);
@@ -342,37 +371,41 @@ int meter_feed(struct dr_meter *self, void *buf, size_t samples) {
 	return 0;
 }
 
-int meter_finish(struct dr_meter *self) {
+int meter_finish(struct dr_meter *self, struct track_info *info) {
 	if (self->fragment_started) {
+		// process any leftover audio
 		meter_fragment_finish(self);
 	}
-	fprintf(stderr, "\nDoing some statistics...\n");
 	sample rms_score[MAX_CHANNELS];
 	sample rms[MAX_CHANNELS];
 	sample peak_score[MAX_CHANNELS];
 	sample dr_channel[MAX_CHANNELS];
 	sample dr_sum = 0;
+	sample peak_max = 0;
+	sample rms_sum = 0;
 	for (int ch = 0; ch < self->channels; ch++) {
-		qsort(self->rms_values[ch], self->fragment, sizeof(**self->rms_values), compare_samples);
-		sample rms_sum = 0;
+		qsort(self->rms_values[ch], self->fragment, sizeof(*self->rms_values[ch]), compare_samples);
+		sample rms_ch_sum = 0;
 		size_t values_to_use = self->fragment / 5;
 		for (size_t i = 0; i < values_to_use; i++) {
 			sample value = self->rms_values[ch][i];
-			rms_sum += value * value;
+			rms_ch_sum += value * value;
 		}
-		rms_score[ch] = sqrt(rms_sum / values_to_use);
+		rms_score[ch] = sqrt(rms_ch_sum / values_to_use);
 
-		rms_sum = 0;
-		for (size_t i = 0; i < self->fragment; i++) {
+		for (size_t i = values_to_use; i < self->fragment; i++) {
 			sample value = self->rms_values[ch][i];
-			rms_sum += value * value;
+			rms_ch_sum += value * value;
 		}
-		rms[ch] = sqrt(rms_sum / self->fragment);
+		rms[ch] = sqrt(rms_ch_sum / self->fragment);
+		rms_sum += rms_ch_sum / self->fragment;
 
 		qsort(self->peak_values[ch], self->fragment, sizeof(*self->peak_values[ch]), compare_samples);
 		peak_score[ch] = self->peak_values[ch][min(1, self->fragment)];
+		peak_max = max(peak_max, self->peak_values[ch][0]);
 
 		dr_channel[ch] = to_db(peak_score[ch] / rms_score[ch]);
+		dr_sum += dr_channel[ch];
 		printf("Ch. %2i:  Peak %8.2f (%8.2f)   RMS %8.2f (%8.2f)   DR = %6.2f\n",
 		       ch,
 		       to_db(self->peak_values[ch][0]),
@@ -380,10 +413,13 @@ int meter_finish(struct dr_meter *self) {
 		       to_db(rms[ch]),
 		       to_db(rms_score[ch]),
 		       dr_channel[ch]);
-		dr_sum += dr_channel[ch];
 	}
-	printf("Overall dynamic range: DR%i\n",
-	       (int)round(dr_sum / ((sample)self->channels)));
+	info->peak = peak_max;
+	info->rms = sqrt(rms_sum / (sample)self->channels);
+	info->dr = dr_sum / (sample)self->channels;
+	info->duration = (self->total_samples + self->sample_rate/2) / self->sample_rate;
+	//printf("%lld\n", self->total_samples);
+	printf("DR%d\n", (int)round(info->dr));
 	return 0;
 }
 
@@ -398,6 +434,7 @@ void meter_free(struct dr_meter *self) {
 
 /******************************************************************************/
 
+
 int print_av_error(const char *function_name, int error) {
 	char errorbuf[128];
 	char *error_ptr = errorbuf;
@@ -408,7 +445,19 @@ int print_av_error(const char *function_name, int error) {
 	return error;
 }
 
-int do_calculate_dr(const char *filename) {
+char *strdup(const char *s)
+{
+	if (s == NULL || *s == '\0')
+		return NULL;
+	size_t len = strlen(s);
+	char *s2 = malloc(len + 1);
+	if (s2 == NULL)
+		return NULL;
+	strcpy(s2, s);
+	return s2;
+}
+
+int calculate_track_dr(const char *filename, struct track_info *t, int number) {
 	struct stream_context sc;
 	struct dr_meter meter;
 	int err;
@@ -425,16 +474,13 @@ int do_calculate_dr(const char *filename) {
 	err = sc_start_stream(&sc, stream_index);
 	if (err < 0) { print_av_error("sc_start_stream", err); goto cleanup; }
 
-	// Print out the stream info
-	AVCodecContext *codec_ctx = sc_get_codec(&sc);
-	char codecinfobuf[256];
-	avcodec_string(codecinfobuf, sizeof(codecinfobuf), codec_ctx, 0);
-	fprintf(stderr, "%.256s\n", codecinfobuf);
+	t->artist = strdup(sc_get_metadata(&sc, "artist"));
+	t->album = strdup(sc_get_metadata(&sc, "album"));
+	t->title = strdup(sc_get_metadata(&sc, "title"));
 
+	AVCodecContext *codec_ctx = sc_get_codec(&sc);
 	err = meter_start(&meter, codec_ctx->channels, codec_ctx->sample_rate, codec_ctx->sample_fmt);
 	if (err) { goto cleanup; }
-
-	fprintf(stderr, "Collecting fragments information...\n");
 
 	size_t fragment = 0;
 	int throbbler_stage = 0;
@@ -451,7 +497,10 @@ int do_calculate_dr(const char *filename) {
 		if (fragment < meter.fragment) {
 			fragment = meter.fragment;
 			if ((throbbler_stage % 4) == 0) {
-				fprintf(stderr, "\033[1K\033[1G %c  %2zu:%02zu ",
+				fprintf(stderr, "\033[1K\033[1G"
+						"Analyzing track %i... "
+						"%c  %2zu:%02zu ",
+						number,
 						throbbler[throbbler_stage / 4],
 						(fragment * 3) / 60,
 						(fragment * 3) % 60);
@@ -461,7 +510,8 @@ int do_calculate_dr(const char *filename) {
 		}
 	}
 
-	meter_finish(&meter);
+	fprintf(stderr, "\033[1K\033[1G");
+	meter_finish(&meter, t);
 
 cleanup:
 	meter_free(&meter);
@@ -474,26 +524,103 @@ cleanup:
 	return 0;
 }
 
+void print_bar(int ch)
+{
+	if (ch == '=') {
+		printf("================================================================================\n");
+	} else {
+		printf("--------------------------------------------------------------------------------\n");
+	}
+}
+
+bool streq(const char *a, const char *b)
+{
+	return strcmp(a, b) == 0;
+}
+
+// array is a pointer to an array of structures which contain a char* member at the given offset
+const char *collapse(void *array, int count, size_t size, size_t offset, const char *zero, const char *many)
+{
+	const char *ret = zero;
+	bool first = true;
+	int i;
+	for (i = 0; i < count; i++) {
+		// s = array[i]->member
+		char *s = *(char **)((char *)array + size*i + offset);
+		if (s == NULL || s[0] == '\0') {
+			continue;
+		}
+
+		if (first) {
+			ret = s;
+			first = false;
+		} else if (!streq(ret, s)) {
+			ret = many;
+			break;
+		}
+	}
+	return ret;
+}
+
+void print_dr(struct track_info *info, int count)
+{
+	int i;
+	const char *artist = collapse(info, count, sizeof(struct track_info), offsetof(struct track_info, artist), "Unknown", "Unknown");
+	const char *album = collapse(info, count, sizeof(struct track_info), offsetof(struct track_info, album), "Unknown", "Various Artists");
+	sample dr_sum = 0;
+	printf("dr_meter " VERSION "\n");
+	//printf("log date: \n");
+	printf("\n");
+	print_bar('-');
+	printf("Analyzed: %s / %s\n", artist, album);
+	print_bar('-');
+	printf("\n");
+	printf("DR         Peak         RMS     Duration Track\n");
+	print_bar('-');
+	for (i = 0; i < count; i++) {
+		// XXX don't print tracks with errors
+		struct track_info *t = &info[i];
+		if (t->err) continue;
+		printf("DR%-4d %8.2f dB %8.2f dB %6d:%02d %d/%d-%s\n",
+		       (int)round(t->dr), to_db(t->peak), to_db(t->rms),
+		       t->duration/60, t->duration%60,
+		       i+1, count,
+		       t->title);
+		dr_sum += t->dr;
+	}
+	print_bar('-');
+	printf("\n");
+	printf("Number of tracks:  %i\n", count);
+	printf("Official DR value: DR%i\n", (int)round(dr_sum / count));
+	print_bar('=');
+	printf("\n");
+}
+
 int main(int argc, char** argv) {
 	av_register_all();
+	av_log_set_level(AV_LOG_ERROR);
 
 	bool err_occurred = false;
 	int err;
 
 	if (argc <= 1) {
 		fprintf(stderr, "Reading from standard input...\n");
-		err = do_calculate_dr("pipe:");
+		err = 0;//do_calculate_dr("pipe:");
 		if (err) {
 			err_occurred = true;
 		}
 	} else {
+		struct track_info *info = calloc(sizeof(struct track_info), argc-1);
+		if (info == NULL) {
+			exit(1);
+		}
 		for (int i = 1; i < argc; i++) {
-			printf("%s\n", argv[i]);
-			err = do_calculate_dr(argv[i]);
-			if (err) {
+			info->err = calculate_track_dr(argv[i], &info[i-1], i);
+			if (info->err) {
 				err_occurred = true;
 			}
 		}
+		print_dr(info, argc - 1);
 	}
 
 	exit(err_occurred ? EXIT_FAILURE : EXIT_SUCCESS);
