@@ -111,7 +111,7 @@ int sc_get_next_frame(struct stream_context *self) {
 	// Grab a new packet, if necessary
 	while (self->state == STATE_OPEN) {
 		err = av_read_frame(self->format_ctx, &self->real_pkt);
-		if (err == AVERROR_EOF || url_feof(self->format_ctx->pb)) {
+		if (err == AVERROR_EOF) {
 			av_init_packet(&self->pkt);
 			self->pkt.data = NULL;
 			self->pkt.size = 0;
