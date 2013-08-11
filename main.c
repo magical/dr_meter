@@ -29,6 +29,8 @@ typedef double sample;
 
 const char throbbler[4] = "/-\\|";
 
+int debug = 0;
+
 struct track_info {
 	int err;
 	sample dr;
@@ -221,12 +223,23 @@ int compare_samples(const void *s1, const void *s2) {
 
 sample get_sample(void *buf, size_t i, enum AVSampleFormat sample_fmt) {
 	switch(sample_fmt) {
-	case AV_SAMPLE_FMT_U8: return (sample)(((uint8_t *)buf)[i] - 0x80) * FACTOR8;
-	case AV_SAMPLE_FMT_S16: return (sample)(((int16_t *)buf)[i]) * FACTOR16;
-	case AV_SAMPLE_FMT_S32: return (sample)(((int32_t *)buf)[i]) * FACTOR32;
-	case AV_SAMPLE_FMT_FLT: return (sample)(((float *)buf)[i]);
-	case AV_SAMPLE_FMT_DBL: return (sample)(((double *)buf)[i]);
-	default: return 0.0;
+	case AV_SAMPLE_FMT_U8:
+	case AV_SAMPLE_FMT_U8P:
+		return (sample)(((uint8_t *)buf)[i] - 0x80) * FACTOR8;
+	case AV_SAMPLE_FMT_S16:
+	case AV_SAMPLE_FMT_S16P:
+		return (sample)(((int16_t *)buf)[i]) * FACTOR16;
+	case AV_SAMPLE_FMT_S32:
+	case AV_SAMPLE_FMT_S32P:
+		return (sample)(((int32_t *)buf)[i]) * FACTOR32;
+	case AV_SAMPLE_FMT_FLT:
+	case AV_SAMPLE_FMT_FLTP:
+		return (sample)(((float *)buf)[i]);
+	case AV_SAMPLE_FMT_DBL:
+	case AV_SAMPLE_FMT_DBLP:
+		return (sample)(((double *)buf)[i]);
+	default:
+		return 0.0;
 	}
 }
 
@@ -259,13 +272,21 @@ int meter_start(struct dr_meter *self, int channels, int sample_rate, int sample
 	}
 
 	if (sample_fmt != AV_SAMPLE_FMT_U8 &&
+	    sample_fmt != AV_SAMPLE_FMT_U8P &&
 	    sample_fmt != AV_SAMPLE_FMT_S16 &&
+	    sample_fmt != AV_SAMPLE_FMT_S16P &&
 	    sample_fmt != AV_SAMPLE_FMT_S32 &&
+	    sample_fmt != AV_SAMPLE_FMT_S32P &&
 	    sample_fmt != AV_SAMPLE_FMT_FLT &&
-	    sample_fmt != AV_SAMPLE_FMT_DBL) {
+	    sample_fmt != AV_SAMPLE_FMT_FLTP &&
+	    sample_fmt != AV_SAMPLE_FMT_DBL &&
+	    sample_fmt != AV_SAMPLE_FMT_DBLP) {
 		fprintf(stderr, "FATAL ERROR: Unsupported sample format: %s\n", av_get_sample_fmt_name(sample_fmt));
 		return 240;
 	}
+        if (debug) {
+            fprintf(stderr, "DEBUG: Sample format: %s\n", av_get_sample_fmt_name(sample_fmt));
+        }
 
 	// Allocate RMS and peak storage
 	for (int ch = 0; ch < channels; ch++) {
@@ -318,8 +339,20 @@ static void meter_fragment_finish(struct dr_meter *self) {
 	self->fragment_started = false;
 }
 
-static inline void meter_scan_internal(struct dr_meter *self, void *buf, size_t samples, enum AVSampleFormat sample_fmt) {
-	for (size_t i = 0; i < samples; i++) {
+static inline void meter_scan_internal(struct dr_meter *self, void *buf, size_t start, size_t end, size_t samples, enum AVSampleFormat sample_fmt) {
+	if (av_sample_fmt_is_planar(sample_fmt)) {
+		for (int ch = 0; ch < self->channels; ch++)
+		for (size_t i = start; i < end; i++) {
+			sample value = get_sample(buf, ch * samples + i, sample_fmt);
+			self->sum[ch] += value * value;
+
+			value = fabs(value);
+			if (self->peak[ch] < value) {
+				self->peak[ch] = value;
+			}
+		}
+	} else {
+		for (size_t i = start; i < end; i++)
 		for (int ch = 0; ch < self->channels; ch++) {
 			sample value = get_sample(buf, i * self->channels + ch, sample_fmt);
 			self->sum[ch] += value * value;
@@ -334,39 +367,43 @@ static inline void meter_scan_internal(struct dr_meter *self, void *buf, size_t 
 
 /* Feed the meter. Scan a single frame of audio. */
 int meter_feed(struct dr_meter *self, void *buf, size_t samples) {
+	size_t start = 0, end = samples;
 	int err;
 
-	//printf("%lld += %zu\n", self->total_samples, samples);
-	self->total_samples += samples;
-
-	while (samples) {
+	while (start < samples) {
 		if (!self->fragment_started) {
 			err = meter_fragment_start(self);
 			if (err) return err;
 		}
 
 		size_t fragment_left = self->fragment_size - self->fragment_read;
-		size_t to_scan = min(fragment_left, samples);
-		#define CASE(fmt) case fmt: meter_scan_internal(self, buf, to_scan, fmt); break
+		end = min(fragment_left, samples);
+		#define CASE(fmt) case fmt: meter_scan_internal(self, buf, start, end, samples, fmt); break
 		switch (self->sample_fmt) {
 		CASE(AV_SAMPLE_FMT_U8);
+		CASE(AV_SAMPLE_FMT_U8P);
 		CASE(AV_SAMPLE_FMT_S16);
+		CASE(AV_SAMPLE_FMT_S16P);
 		CASE(AV_SAMPLE_FMT_S32);
+		CASE(AV_SAMPLE_FMT_S32P);
 		CASE(AV_SAMPLE_FMT_FLT);
+		CASE(AV_SAMPLE_FMT_FLTP);
 		CASE(AV_SAMPLE_FMT_DBL);
+		CASE(AV_SAMPLE_FMT_DBLP);
 		default:
-			meter_scan_internal(self, buf, to_scan, self->sample_fmt);
+			meter_scan_internal(self, buf, start, end, samples, self->sample_fmt);
 		}
 		#undef CASE
-		buf = (char *)buf + self->sample_size * self->channels * to_scan;
-		self->fragment_read += to_scan;
+		self->fragment_read += end - start;
+		start = end;
 
 		if (self->fragment_size <= self->fragment_read) {
 			meter_fragment_finish(self);
 		}
-
-		samples -= to_scan;
 	}
+
+	//printf("%lld += %zu\n", self->total_samples, samples);
+	self->total_samples += samples;
 
 	return 0;
 }
