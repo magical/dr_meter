@@ -39,6 +39,7 @@ struct track_info {
 	int duration;
 	char *artist;
 	char *album;
+        char *tracknumber;
 	char *title;
 };
 
@@ -513,6 +514,7 @@ int calculate_track_dr(const char *filename, struct track_info *t, int number) {
 
 	t->artist = strdup(sc_get_metadata(&sc, "artist"));
 	t->album = strdup(sc_get_metadata(&sc, "album"));
+        t->tracknumber = strdup(sc_get_metadata(&sc, "track"));
 	t->title = strdup(sc_get_metadata(&sc, "title"));
 
 	AVCodecContext *codec_ctx = sc_get_codec(&sc);
@@ -618,11 +620,10 @@ void print_dr(struct track_info *info, int count)
 		// XXX don't print tracks with errors
 		struct track_info *t = &info[i];
 		if (t->err) continue;
-		printf("DR%-4d %8.2f dB %8.2f dB %6d:%02d %d/%d-%s\n",
+		printf("DR%-4d %8.2f dB %8.2f dB %6d:%02d %s-%s\n",
 		       (int)round(t->dr), to_db(t->peak), to_db(t->rms),
 		       t->duration/60, t->duration%60,
-		       i+1, count,
-		       t->title);
+		       t->tracknumber, t->title);
 		dr_sum += t->dr;
 	}
 	print_bar('-');
