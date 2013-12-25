@@ -51,6 +51,7 @@ struct stream_context {
 	AVPacket real_pkt;
 	AVPacket pkt;
 	AVFrame *frame;
+	AVDictionary *opts;
 	enum {
 		STATE_UNINITIALIZED,
 		STATE_INITIALIZED,
@@ -65,6 +66,7 @@ void sc_init(struct stream_context *self) {
 	self->format_ctx = NULL;
 	self->stream_index = 0;
 	self->state = STATE_INITIALIZED;
+	self->opts = NULL;
 }
 
 int sc_open(struct stream_context *self, const char *filename) {
@@ -88,6 +90,7 @@ AVCodecContext *sc_get_codec(struct stream_context *self) {
 
 void sc_close(struct stream_context *self) {
 	if (STATE_OPEN <= self->state && self->state != STATE_CLOSED) {
+		av_dict_free(&self->opts);
 		avcodec_close(sc_get_codec(self));
 		avformat_close_input(&self->format_ctx);
 		av_free(self->frame);
@@ -113,8 +116,12 @@ int sc_start_stream(struct stream_context *self, int stream_index) {
 		return AVERROR(ENOMEM);
 	}
 
+	if (codec->id == CODEC_ID_AC3) {
+		av_dict_set(&self->opts, "drc_scale", "0", 0);
+	}
+
 	/* XXX check codec */
-	return avcodec_open2(ctx, codec, NULL);
+	return avcodec_open2(ctx, codec, &self->opts);
 }
 
 // Decode one frame of audio
