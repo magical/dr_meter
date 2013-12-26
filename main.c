@@ -29,7 +29,7 @@ typedef double sample;
 
 const char throbbler[4] = "/-\\|";
 
-int debug = 0;
+static int debug = 0;
 
 struct track_info {
 	int err;
@@ -111,7 +111,7 @@ int sc_start_stream(struct stream_context *self, int stream_index) {
 	}
 
 	// Allocate a frame.
-	self->frame = avcodec_alloc_frame();
+	self->frame = av_frame_alloc();
 	if (self->frame == NULL) {
 		return AVERROR(ENOMEM);
 	}
@@ -147,7 +147,7 @@ int sc_get_next_frame(struct stream_context *self) {
 			self->state = STATE_VALID_PACKET;
 		} else {
 			// we don't care about this frame; try another
-			av_free_packet(&self->real_pkt);
+			av_packet_unref(&self->real_pkt);
 		}
 	}
 
@@ -159,18 +159,24 @@ int sc_get_next_frame(struct stream_context *self) {
 	// The codec is not required to read the entire packet, so we may need
 	// to keep it around for a while.
 	int got_frame;
-	avcodec_get_frame_defaults(self->frame);
+	//avcodec_get_frame_defaults(self->frame);
+	av_frame_unref(self->frame);
+	self->frame = av_frame_alloc();
+
 	err = avcodec_decode_audio4(codec_ctx, self->frame, &got_frame, &self->pkt);
 	if (err < 0) { return err; }
 	int bytes_used = err;
 
 	if (self->state == STATE_VALID_PACKET) {
 		if (0 < bytes_used && bytes_used < self->pkt.size) {
+			if (debug) {
+				printf("partial frame\n");
+			}
 			self->pkt.data += bytes_used;
 			self->pkt.size -= bytes_used;
 		} else  {
 			self->state = STATE_OPEN;
-			av_free_packet(&self->real_pkt);
+			av_packet_unref(&self->real_pkt);
 		}
 	} else if (self->state == STATE_NEED_FLUSH) {
 		avcodec_close(codec_ctx);
@@ -180,9 +186,10 @@ int sc_get_next_frame(struct stream_context *self) {
 	return 0;
 }
 
-void *sc_get_buf(struct stream_context *self)
+void **sc_get_buf(struct stream_context *self)
 {
-	return self->frame->data[0];
+	uint8_t **tmp = self->frame->extended_data; // for type checking
+	return (void **)tmp;
 }
 
 size_t sc_get_samples(struct stream_context *self)
@@ -347,11 +354,33 @@ static void meter_fragment_finish(struct dr_meter *self) {
 	self->fragment_started = false;
 }
 
-static inline void meter_scan_internal(struct dr_meter *self, void *buf, size_t start, size_t end, size_t samples, enum AVSampleFormat sample_fmt) {
+static void dump(void *buf, size_t len, int sample_fmt) {
+	size_t i;
+	for (i = 0; i < len; i++) {
+		fprintf(stdout, "[%d]: %.17f\n", i, get_sample(buf, i, sample_fmt));
+	}
+}
+
+static inline void meter_scan_internal(struct dr_meter *self, void **buf, size_t start, size_t end, size_t samples, enum AVSampleFormat sample_fmt) {
+	if (buf == NULL) {
+		return;
+	}
 	if (av_sample_fmt_is_planar(sample_fmt)) {
 		for (int ch = 0; ch < self->channels; ch++)
 		for (size_t i = start; i < end; i++) {
-			sample value = get_sample(buf, ch * samples + i, sample_fmt);
+			if (buf[ch] == NULL) {
+				printf("missing channel %d data\n", ch);
+				exit(1);
+			}
+			sample value = get_sample(buf[ch], i, sample_fmt);
+			//if (isnan(value)) {
+			//	value = 0;
+			//}
+			if (debug && isnan(value)) {
+				fprintf(stdout, "%f at [%d][%d] (%d)\n", value, ch, i, i + self->fragment_read);
+				dump(buf[ch], samples, sample_fmt);
+				exit(1);
+			}
 			self->sum[ch] += value * value;
 
 			value = fabs(value);
@@ -362,7 +391,7 @@ static inline void meter_scan_internal(struct dr_meter *self, void *buf, size_t 
 	} else {
 		for (size_t i = start; i < end; i++)
 		for (int ch = 0; ch < self->channels; ch++) {
-			sample value = get_sample(buf, i * self->channels + ch, sample_fmt);
+			sample value = get_sample(buf[0], i * self->channels + ch, sample_fmt);
 			self->sum[ch] += value * value;
 
 			value = fabs(value);
@@ -374,9 +403,13 @@ static inline void meter_scan_internal(struct dr_meter *self, void *buf, size_t 
 }
 
 /* Feed the meter. Scan a single frame of audio. */
-int meter_feed(struct dr_meter *self, void *buf, size_t samples) {
+int meter_feed(struct dr_meter *self, void **buf, size_t samples) {
 	size_t start = 0, end = samples;
 	int err;
+
+	if (debug && 0) {
+		fprintf(stdout, "%d\n", samples);
+	}
 
 	while (start < samples) {
 		if (!self->fragment_started) {
@@ -511,6 +544,11 @@ int calculate_track_dr(const char *filename, struct track_info *t, int number) {
 
 	err = sc_open(&sc, filename);
 	if (err < 0) { return print_av_error("sc_open", err); }
+
+	if (debug) {
+		printf("DEBUG: Codec: %s\n", avcodec_get_name(sc_get_codec(&sc)->codec_id));
+	}
+
 
 	int stream_index = err = av_find_best_stream(
 		sc.format_ctx, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
