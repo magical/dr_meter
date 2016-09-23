@@ -357,7 +357,7 @@ static void meter_fragment_finish(struct dr_meter *self) {
 static void dump(void *buf, size_t len, int sample_fmt) {
 	size_t i;
 	for (i = 0; i < len; i++) {
-		fprintf(stdout, "[%d]: %.17f\n", i, get_sample(buf, i, sample_fmt));
+		fprintf(stdout, "[%zd]: %.17f\n", i, get_sample(buf, i, sample_fmt));
 	}
 }
 
@@ -377,7 +377,7 @@ static inline void meter_scan_internal(struct dr_meter *self, void **buf, size_t
 			//	value = 0;
 			//}
 			if (debug && isnan(value)) {
-				fprintf(stdout, "%f at [%d][%d] (%d)\n", value, ch, i, i + self->fragment_read);
+				fprintf(stdout, "%f at [%d][%zd] (%zd)\n", value, ch, i, i + self->fragment_read);
 				dump(buf[ch], samples, sample_fmt);
 				exit(1);
 			}
@@ -408,7 +408,7 @@ int meter_feed(struct dr_meter *self, void **buf, size_t samples) {
 	int err;
 
 	if (debug && 0) {
-		fprintf(stdout, "%d\n", samples);
+		fprintf(stdout, "%zd\n", samples);
 	}
 
 	while (start < samples) {
