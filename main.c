@@ -461,10 +461,18 @@ int meter_finish(struct dr_meter *self, struct track_info *info) {
 	sample dr_sum = 0;
 	sample peak_max = 0;
 	sample rms_sum = 0;
+	size_t values_to_use = 0;
+	values_to_use = max(self->fragment / 5, 1);
+	if (!values_to_use) {
+		info->peak = 0;
+		info->rms = 0;
+		info->dr = -INFINITY;
+		info->duration = 0;
+		return 0;
+	}
 	for (int ch = 0; ch < self->channels; ch++) {
 		qsort(self->rms_values[ch], self->fragment, sizeof(*self->rms_values[ch]), compare_samples);
 		sample rms_ch_sum = 0;
-		size_t values_to_use = self->fragment / 5;
 		for (size_t i = 0; i < values_to_use; i++) {
 			sample value = self->rms_values[ch][i];
 			rms_ch_sum += value * value;
