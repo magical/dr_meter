@@ -47,6 +47,7 @@ struct track_info {
 
 struct stream_context {
 	AVFormatContext *format_ctx;
+	AVCodecContext *codec_ctx;
 	int stream_index; // the stream we are decoding
 	AVPacket real_pkt;
 	AVPacket pkt;
@@ -83,15 +84,19 @@ int sc_open(struct stream_context *self, const char *filename) {
 	return 0;
 }
 
-/* return the AVCodecContext for the active stream */
-AVCodecContext *sc_get_codec(struct stream_context *self) {
-	return self->format_ctx->streams[self->stream_index]->codec;
+/* return the AVCodecID for the active stream */
+enum AVCodecID sc_get_codec_id(struct stream_context *self) {
+	return self->format_ctx->streams[self->stream_index]->codecpar->codec_id;
+}
+
+AVCodecParameters* sc_get_codec_parameters(struct stream_context *self) {
+	return self->format_ctx->streams[self->stream_index]->codecpar;
 }
 
 void sc_close(struct stream_context *self) {
 	if (STATE_OPEN <= self->state && self->state != STATE_CLOSED) {
 		av_dict_free(&self->opts);
-		avcodec_close(sc_get_codec(self));
+		avcodec_free_context(&self->codec_ctx);
 		avformat_close_input(&self->format_ctx);
 		av_free(self->frame);
 		self->state = STATE_CLOSED;
@@ -102,13 +107,24 @@ bool sc_eof(struct stream_context *self) {
 	return self->state == STATE_CLOSED;
 }
 
-int sc_start_stream(struct stream_context *self, int stream_index) {
-	self->stream_index = stream_index;
-	AVCodecContext *ctx = sc_get_codec(self);
-	AVCodec *codec = avcodec_find_decoder(ctx->codec_id);
+int sc_open_codec(struct stream_context *self, enum AVCodecID codec_id) {
+	AVCodec *codec = avcodec_find_decoder(codec_id);
 	if (codec == NULL) {
 		return AVERROR_DECODER_NOT_FOUND;
 	}
+
+	self->codec_ctx = avcodec_alloc_context3(codec);
+
+	if (codec->id == AV_CODEC_ID_AC3) {
+		av_dict_set(&self->opts, "drc_scale", "0", 0);
+	}
+
+	/* XXX check codec */
+	return avcodec_open2(self->codec_ctx, codec, &self->opts);
+}
+
+int sc_start_stream(struct stream_context *self, int stream_index) {
+	int err;
 
 	// Allocate a frame.
 	self->frame = av_frame_alloc();
@@ -116,12 +132,14 @@ int sc_start_stream(struct stream_context *self, int stream_index) {
 		return AVERROR(ENOMEM);
 	}
 
-	if (codec->id == CODEC_ID_AC3) {
-		av_dict_set(&self->opts, "drc_scale", "0", 0);
+	self->stream_index = stream_index;
+	err = sc_open_codec(self, sc_get_codec_id(self));
+	if (err) {
+		av_free(self->frame);
+		return err;
 	}
 
-	/* XXX check codec */
-	return avcodec_open2(ctx, codec, &self->opts);
+	return 0;
 }
 
 // Decode one frame of audio
@@ -151,8 +169,6 @@ int sc_get_next_frame(struct stream_context *self) {
 		}
 	}
 
-	AVCodecContext *codec_ctx = sc_get_codec(self);
-
 	// Decode the audio.
 
 	// The return value is the number of bytes read from the packet.
@@ -163,7 +179,7 @@ int sc_get_next_frame(struct stream_context *self) {
 	av_frame_unref(self->frame);
 	self->frame = av_frame_alloc();
 
-	err = avcodec_decode_audio4(codec_ctx, self->frame, &got_frame, &self->pkt);
+	err = avcodec_decode_audio4(self->codec_ctx, self->frame, &got_frame, &self->pkt);
 	if (err < 0) { return err; }
 	int bytes_used = err;
 
@@ -179,7 +195,7 @@ int sc_get_next_frame(struct stream_context *self) {
 			av_packet_unref(&self->real_pkt);
 		}
 	} else if (self->state == STATE_NEED_FLUSH) {
-		avcodec_close(codec_ctx);
+		avcodec_close(self->codec_ctx);
 		self->state = STATE_CLOSED;
 	}
 
@@ -554,7 +570,7 @@ int calculate_track_dr(const char *filename, struct track_info *t, int number) {
 	if (err < 0) { return print_av_error("sc_open", err); }
 
 	if (debug) {
-		printf("DEBUG: Codec: %s\n", avcodec_get_name(sc_get_codec(&sc)->codec_id));
+		printf("DEBUG: Codec: %s\n", avcodec_get_name(sc_get_codec_id(&sc)));
 	}
 
 
@@ -570,8 +586,8 @@ int calculate_track_dr(const char *filename, struct track_info *t, int number) {
         t->tracknumber = strdup(sc_get_metadata(&sc, "track"));
 	t->title = strdup(sc_get_metadata(&sc, "title"));
 
-	AVCodecContext *codec_ctx = sc_get_codec(&sc);
-	err = meter_start(&meter, codec_ctx->channels, codec_ctx->sample_rate, codec_ctx->sample_fmt);
+	AVCodecParameters *codecpar = sc_get_codec_parameters(&sc);
+	err = meter_start(&meter, codecpar->channels, codecpar->sample_rate, codecpar->format);
 	if (err) { goto cleanup; }
 
 	size_t fragment = 0;
