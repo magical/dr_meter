@@ -576,10 +576,10 @@ int calculate_track_dr(const char *filename, struct track_info *t, int number) {
 
 	int stream_index = err = av_find_best_stream(
 		sc.format_ctx, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
-	if (err < 0) { print_av_error("av_find_best_stream", err); goto cleanup; }
+	if (err < 0) { print_av_error("av_find_best_stream", err); goto cleanup1; }
 
 	err = sc_start_stream(&sc, stream_index);
-	if (err < 0) { print_av_error("sc_start_stream", err); goto cleanup; }
+	if (err < 0) { print_av_error("sc_start_stream", err); goto cleanup1; }
 
 	t->artist = strdup(sc_get_metadata(&sc, "artist"));
 	t->album = strdup(sc_get_metadata(&sc, "album"));
@@ -622,8 +622,9 @@ int calculate_track_dr(const char *filename, struct track_info *t, int number) {
 	meter_finish(&meter, t);
 
 cleanup:
-	meter_free(&meter);
 	sc_close(&sc);
+cleanup1:
+	meter_free(&meter);
 
 	if (err < 0) {
 		return err;
