@@ -108,6 +108,7 @@ bool sc_eof(struct stream_context *self) {
 }
 
 int sc_open_codec(struct stream_context *self, enum AVCodecID codec_id) {
+	int err;
 	AVCodec *codec = avcodec_find_decoder(codec_id);
 	if (codec == NULL) {
 		return AVERROR_DECODER_NOT_FOUND;
@@ -117,6 +118,12 @@ int sc_open_codec(struct stream_context *self, enum AVCodecID codec_id) {
 
 	if (codec->id == AV_CODEC_ID_AC3) {
 		av_dict_set(&self->opts, "drc_scale", "0", 0);
+	}
+
+	// Copy codec parameters from input stream to output codec context
+	err = avcodec_parameters_to_context(self->codec_ctx, self->format_ctx->streams[self->stream_index]->codecpar);
+	if (err < 0) {
+		return err;
 	}
 
 	/* XXX check codec */
