@@ -98,6 +98,7 @@ void sc_close(struct stream_context *self) {
 		avcodec_free_context(&self->codec_ctx);
 		avformat_close_input(&self->format_ctx);
 		av_frame_free(&self->frame);
+		av_packet_unref(&self->pkt);
 		self->state = STATE_CLOSED;
 	}
 }
@@ -132,6 +133,8 @@ int sc_open_codec(struct stream_context *self, enum AVCodecID codec_id) {
 int sc_start_stream(struct stream_context *self, int stream_index) {
 	int err;
 
+	av_init_packet(&self->pkt);
+
 	if (self->frame == NULL) {
 		self->frame = av_frame_alloc();
 		if (self->frame == NULL) {
@@ -160,6 +163,7 @@ int sc_get_next_frame(struct stream_context *self) {
 retry:
 	// Grab a new packet, if necessary
 	if (self->state == STATE_NEED_PACKET) {
+		av_packet_unref(&self->pkt);
 		err = av_read_frame(self->format_ctx, &self->pkt);
 		if (err == AVERROR_EOF) {
 			// End of input file; flush the decoder
