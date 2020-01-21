@@ -49,7 +49,6 @@ struct stream_context {
 	AVFormatContext *format_ctx;
 	AVCodecContext *codec_ctx;
 	int stream_index; // the stream we are decoding
-	AVPacket real_pkt;
 	AVPacket pkt;
 	AVFrame *frame;
 	AVDictionary *opts;
@@ -161,8 +160,10 @@ int sc_get_next_frame(struct stream_context *self) {
 retry:
 	// Grab a new packet, if necessary
 	if (self->state == STATE_NEED_PACKET) {
-		err = av_read_frame(self->format_ctx, &self->real_pkt);
+		err = av_read_frame(self->format_ctx, &self->pkt);
 		if (err == AVERROR_EOF) {
+			// End of input file; flush the decoder
+			// by sending an empty packet
 			av_init_packet(&self->pkt);
 			self->pkt.data = NULL;
 			self->pkt.size = 0;
@@ -173,16 +174,16 @@ retry:
 			self->state = STATE_VALID_PACKET;
 		} else if (err < 0) {
 			return err;
-		} else if (self->real_pkt.stream_index == self->stream_index) {
+		} else if (self->pkt.stream_index == self->stream_index) {
 			// Okay, send the packet to the decoder
-			err = avcodec_send_packet(self->codec_ctx, &self->real_pkt);
+			err = avcodec_send_packet(self->codec_ctx, &self->pkt);
 			if (err < 0) {
 				return err;
 			}
 			self->state = STATE_VALID_PACKET;
 		} else {
-			// we don't care about this frame; try another
-			av_packet_unref(&self->real_pkt);
+			// we don't care about this packet; try another
+			av_packet_unref(&self->pkt);
 			goto retry;
 		}
 	}
