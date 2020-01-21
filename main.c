@@ -56,10 +56,8 @@ struct stream_context {
 	enum {
 		STATE_UNINITIALIZED,
 		STATE_INITIALIZED,
-		STATE_OPEN,
 		STATE_NEED_PACKET,
 		STATE_VALID_PACKET,
-		STATE_NEED_FLUSH,
 		STATE_CLOSED,
 	} state;
 };
@@ -81,7 +79,7 @@ int sc_open(struct stream_context *self, const char *filename) {
 	err = avformat_find_stream_info(self->format_ctx, NULL);
 	if (err < 0) { return err; }
 
-	self->state = STATE_OPEN;
+	self->state = STATE_NEED_PACKET;
 
 	return 0;
 }
@@ -96,7 +94,7 @@ AVCodecParameters* sc_get_codec_parameters(struct stream_context *self) {
 }
 
 void sc_close(struct stream_context *self) {
-	if (STATE_OPEN <= self->state && self->state != STATE_CLOSED) {
+	if (STATE_INITIALIZED < self->state && self->state != STATE_CLOSED) {
 		av_dict_free(&self->opts);
 		avcodec_free_context(&self->codec_ctx);
 		avformat_close_input(&self->format_ctx);
@@ -160,10 +158,6 @@ int sc_get_next_frame(struct stream_context *self) {
 		return AVERROR_EOF;
 	}
 
-	if (self->state == STATE_OPEN) {
-		self->state = STATE_NEED_PACKET;
-	}
-
 retry:
 	// Grab a new packet, if necessary
 	if (self->state == STATE_NEED_PACKET) {
@@ -176,7 +170,7 @@ retry:
 			if (err < 0) {
 				return err;
 			}
-			self->state = STATE_NEED_FLUSH; // TODO: drop this state?
+			self->state = STATE_VALID_PACKET;
 		} else if (err < 0) {
 			return err;
 		} else if (self->real_pkt.stream_index == self->stream_index) {
@@ -196,7 +190,7 @@ retry:
 	// Decode the audio.
 	// https://ffmpeg.org/doxygen/3.1/group__lavc__encdec.html
 
-	if (self->state == STATE_VALID_PACKET || self->state == STATE_NEED_FLUSH) {
+	if (self->state == STATE_VALID_PACKET) {
 		err = avcodec_receive_frame(self->codec_ctx, self->frame);
 		if (err == AVERROR(EAGAIN)) {
 			// No frames left; need to read a new packet.
