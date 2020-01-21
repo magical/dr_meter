@@ -57,6 +57,7 @@ struct stream_context {
 		STATE_UNINITIALIZED,
 		STATE_INITIALIZED,
 		STATE_OPEN,
+		STATE_NEED_PACKET,
 		STATE_VALID_PACKET,
 		STATE_NEED_FLUSH,
 		STATE_CLOSED,
@@ -68,6 +69,7 @@ void sc_init(struct stream_context *self) {
 	self->stream_index = 0;
 	self->state = STATE_INITIALIZED;
 	self->opts = NULL;
+	self->frame = NULL;
 }
 
 int sc_open(struct stream_context *self, const char *filename) {
@@ -98,7 +100,7 @@ void sc_close(struct stream_context *self) {
 		av_dict_free(&self->opts);
 		avcodec_free_context(&self->codec_ctx);
 		avformat_close_input(&self->format_ctx);
-		av_free(self->frame);
+		av_frame_free(&self->frame);
 		self->state = STATE_CLOSED;
 	}
 }
@@ -133,16 +135,17 @@ int sc_open_codec(struct stream_context *self, enum AVCodecID codec_id) {
 int sc_start_stream(struct stream_context *self, int stream_index) {
 	int err;
 
-	// Allocate a frame.
-	self->frame = av_frame_alloc();
 	if (self->frame == NULL) {
-		return AVERROR(ENOMEM);
+		self->frame = av_frame_alloc();
+		if (self->frame == NULL) {
+			return AVERROR(ENOMEM);
+		}
 	}
 
 	self->stream_index = stream_index;
 	err = sc_open_codec(self, sc_get_codec_id(self));
 	if (err) {
-		av_free(self->frame);
+		av_frame_free(&self->frame);
 		return err;
 	}
 
@@ -157,53 +160,55 @@ int sc_get_next_frame(struct stream_context *self) {
 		return AVERROR_EOF;
 	}
 
+	if (self->state == STATE_OPEN) {
+		self->state = STATE_NEED_PACKET;
+	}
+
+retry:
 	// Grab a new packet, if necessary
-	while (self->state == STATE_OPEN) {
+	if (self->state == STATE_NEED_PACKET) {
 		err = av_read_frame(self->format_ctx, &self->real_pkt);
 		if (err == AVERROR_EOF) {
 			av_init_packet(&self->pkt);
 			self->pkt.data = NULL;
 			self->pkt.size = 0;
-			self->state = STATE_NEED_FLUSH;
+			err = avcodec_send_packet(self->codec_ctx, &self->pkt);
+			if (err < 0) {
+				return err;
+			}
+			self->state = STATE_NEED_FLUSH; // TODO: drop this state?
 		} else if (err < 0) {
 			return err;
 		} else if (self->real_pkt.stream_index == self->stream_index) {
-			self->pkt = self->real_pkt;
+			// Okay, send the packet to the decoder
+			err = avcodec_send_packet(self->codec_ctx, &self->real_pkt);
+			if (err < 0) {
+				return err;
+			}
 			self->state = STATE_VALID_PACKET;
 		} else {
 			// we don't care about this frame; try another
 			av_packet_unref(&self->real_pkt);
+			goto retry;
 		}
 	}
 
 	// Decode the audio.
+	// https://ffmpeg.org/doxygen/3.1/group__lavc__encdec.html
 
-	// The return value is the number of bytes read from the packet.
-	// The codec is not required to read the entire packet, so we may need
-	// to keep it around for a while.
-	int got_frame;
-	//avcodec_get_frame_defaults(self->frame);
-	av_frame_unref(self->frame);
-	self->frame = av_frame_alloc();
-
-	err = avcodec_decode_audio4(self->codec_ctx, self->frame, &got_frame, &self->pkt);
-	if (err < 0) { return err; }
-	int bytes_used = err;
-
-	if (self->state == STATE_VALID_PACKET) {
-		if (0 < bytes_used && bytes_used < self->pkt.size) {
-			if (debug) {
-				printf("partial frame\n");
-			}
-			self->pkt.data += bytes_used;
-			self->pkt.size -= bytes_used;
-		} else  {
-			self->state = STATE_OPEN;
-			av_packet_unref(&self->real_pkt);
+	if (self->state == STATE_VALID_PACKET || self->state == STATE_NEED_FLUSH) {
+		err = avcodec_receive_frame(self->codec_ctx, self->frame);
+		if (err == AVERROR(EAGAIN)) {
+			// No frames left; need to read a new packet.
+			self->state = STATE_NEED_PACKET;
+			goto retry;
 		}
-	} else if (self->state == STATE_NEED_FLUSH) {
-		avcodec_close(self->codec_ctx);
-		self->state = STATE_CLOSED;
+		if (err == AVERROR_EOF) {
+			avcodec_close(self->codec_ctx);
+			self->state = STATE_CLOSED;
+			return 0;
+		}
+		if (err < 0) { return err; }
 	}
 
 	return 0;
