@@ -717,7 +717,6 @@ void print_dr(struct track_info *info, int count)
 }
 
 int main(int argc, char** argv) {
-	av_register_all();
 	av_log_set_level(AV_LOG_ERROR);
 
 	bool err_occurred = false;
