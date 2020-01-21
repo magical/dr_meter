@@ -57,6 +57,7 @@ struct stream_context {
 		STATE_INITIALIZED,
 		STATE_NEED_PACKET,
 		STATE_VALID_PACKET,
+		STATE_EOF,
 		STATE_CLOSED,
 	} state;
 };
@@ -104,7 +105,7 @@ void sc_close(struct stream_context *self) {
 }
 
 bool sc_eof(struct stream_context *self) {
-	return self->state == STATE_CLOSED;
+	return self->state == STATE_EOF || self->state == STATE_CLOSED;
 }
 
 int sc_open_codec(struct stream_context *self, enum AVCodecID codec_id) {
@@ -156,7 +157,7 @@ int sc_start_stream(struct stream_context *self, int stream_index) {
 int sc_get_next_frame(struct stream_context *self) {
 	int err;
 
-	if (self->state == STATE_CLOSED) {
+	if (self->state == STATE_EOF || self->state == STATE_CLOSED) {
 		return AVERROR_EOF;
 	}
 
@@ -204,7 +205,7 @@ retry:
 		}
 		if (err == AVERROR_EOF) {
 			avcodec_close(self->codec_ctx);
-			self->state = STATE_CLOSED;
+			self->state = STATE_EOF;
 			return 0;
 		}
 		if (err < 0) { return err; }
